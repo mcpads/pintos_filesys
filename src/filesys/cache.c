@@ -3,9 +3,9 @@
 #include <string.h>
 
 enum buf_flag_t {
-  B_VALID = 0x0,
-  B_BUSY = 0x1,
-  B_DIRTY = 0x2,
+  B_VALID = 0x0, // 00
+  B_BUSY = 0x1, // 01
+  B_DIRTY = 0x2, // 10
 };
 
 struct buf
@@ -153,8 +153,17 @@ cacheLoadBlock(struct block* b, block_sector_t sec)
   // Block read
   
   block_read(b, sec, ndata->data);
+
+  ndata->flag |= B_BUSY;
+  ndata->block = b;
+  ndata->sec = sec;
+
   block_read(b, sec+1, adata->data);
 
+  adata->flag |= B_BUSY;
+  adata->block = b;
+  adata->sec = sec+1;
+  
   cacheUpdate(ahead);
   cacheUpdate(now);
 
@@ -187,10 +196,11 @@ void cache_write(struct block* b, block_sector_t sec, const void* from)
 
   struct buf* buffer = list_entry(where, struct buf, elem);
 
-  buffer->flag |= B_DIRTY | B_BUSY;
-  buffer->block = b;
-  buffer->sec = sec;
+  buffer->flag |= B_DIRTY;
+
   memcpy(buffer->data, from, BLOCK_SECTOR_SIZE);
+
+  cacheUpdate(where);
 }
 
 
@@ -213,10 +223,9 @@ void cache_read(struct block* b, block_sector_t sec, void* to)
 
   struct buf* buffer = list_entry(where, struct buf, elem);
 
-  buffer->flag |= B_BUSY;
-  buffer->block = b;
-  buffer->sec = sec;
   memcpy(to, buffer->data, BLOCK_SECTOR_SIZE);
+
+  cacheUpdate(where);
 }
 
 /*
@@ -286,10 +295,8 @@ void cache_flush(void)
   struct list_elem* pos;
   for(pos = list_begin(&cache) ; 
       pos != list_end(&cache);
-      pos = pos->next){
-    struct buf* temp = list_entry(pos, struct buf, elem);
-    cache_force_one(temp);
-  }
+      pos = pos->next)
+    cache_force_one(pos);
 }
 
 
