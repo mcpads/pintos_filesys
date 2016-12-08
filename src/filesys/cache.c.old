@@ -11,7 +11,6 @@ enum buf_flag_t {
   B_VALID = 0x0, // 00
   B_BUSY = 0x1, // 01
   B_DIRTY = 0x2, // 10
-  B_LOADOK = 0x4
 };
 
 
@@ -78,6 +77,14 @@ void cache_init()
   thread_create("cache_wb", PRI_DEFAULT, cacheWriteBackThread, NULL);
 }
 
+struct cache_set
+{
+  block_sector_t sec;
+  struct list_elem* cache1;
+  struct list_elem* cache2;
+};
+
+
 /*
  * cacheGetFree
  *
@@ -86,14 +93,29 @@ void cache_init()
  * RET  | if cache is full, NULL
  *      | else last element of (LOCKED) cache mem
  */
-static struct cache_e* 
+static struct list_elem* 
 cacheGetFree(void)
 {
-  int i;
-  for(i = 0 ; i < MAX_CACHE_SIZE ; i++){
-    if(_cache_buffer[i].flag
-        || !lock_try_acquire(&_cache_buffer[i].cache_lock)) continue;
-    return _cache_buffer + i;
+  int try_count = 2;
+  struct list_elem* pos = list_rbegin(&cache);
+
+  while(try_count--){
+    struct cache_e* buffer = list_entry(pos, struct cache_e, elem);
+
+    if(!lock_try_acquire(&buffer->cache_lock)){ 
+      pos = pos->prev;
+      continue;
+    }
+
+    if(buffer->flag){
+      lock_release(&buffer->cache_lock);
+      if(try_count--) continue;
+      return NULL;
+    }
+    else {
+      buffer->flag |= B_BUSY;
+      return pos;
+    }
   }
   return NULL;
 }
@@ -125,14 +147,15 @@ cacheUpdate(struct list_elem* e)
  * RET  | If fail, NULL
  *      | else, list_elem* of found (LOCKED) value
  */
-static struct cache_e*
+static struct list_elem*
 cacheGetIdx(block_sector_t sec)
 {
   int i;
 
   for(i = 0 ; i < MAX_CACHE_SIZE ; i++){
     struct cache_e* temp = _cache_buffer + i;
-
+      
+      // list_entry(pos, struct cache_e, elem);
     if(temp->sec == sec){
       lock_acquire(&temp->cache_lock);
       if(temp->sec != sec){
@@ -141,18 +164,14 @@ cacheGetIdx(block_sector_t sec)
       }
       else{
         cacheUpdate(&temp->elem);
-        return temp;
+        return &temp->elem;
       }
     }
   }
   return NULL;
 }
 
-struct ahead_set
-{
-  block_sector_t sec;
-  struct semaphore* sema;
-};
+
 
 
 static void cache_eviction(void);
@@ -160,26 +179,22 @@ static void cache_eviction(void);
 
 static void cacheLoadThread(void* aux)
 {
-  struct ahead_set aheadWrap = *(struct ahead_set*)aux;
-  free(aux);
+  int sector = *(block_sector_t*)aux;
 
-  struct cache_e* ahead;
-  while((ahead = cacheGetFree()) == NULL)
+  free(aux);
+  struct list_elem* now;
+  while((now = cacheGetFree()) == NULL)
     cache_eviction();
 
   // get lock by cacheGetFree
   //
-  ahead->sec = aheadWrap.sec;
-  sema_up(aheadWrap.sema);
-  
-  if(ahead->flag & B_LOADOK) ahead->flag -= B_LOADOK;
+  struct cache_e* ahead = list_entry(now, struct cache_e, elem);
 
-  block_read(fs_device, aheadWrap.sec, ahead->data);
-  cacheUpdate(&ahead->elem); 
-
-  ahead->flag |= B_LOADOK;
-
+  block_read(fs_device, sector, ahead->data);
+  ahead->sec = sector;
+  cacheUpdate(now); 
   lock_release(&ahead->cache_lock);
+
 }
 
 /* 
@@ -195,41 +210,30 @@ static void cacheLoadThread(void* aux)
  */
 
 
-static struct cache_e*
+static struct list_elem*
 cacheLoadBlock(block_sector_t sec)
 {
-  struct semaphore sema1;
-  sema_init(&sema1, 0);
-
-  struct cache_e* ndata;
-  while((ndata = cacheGetFree()) == NULL)
+  struct list_elem* now;
+  while((now = cacheGetFree()) == NULL)
     cache_eviction(); 
 
-    // get lock by cacheGetFree
+  struct cache_e* ndata = list_entry(now, struct cache_e, elem);
+  // Block read
+  
+  // get lock by cacheGetFree
   //
- 
-  if(ndata->flag & B_LOADOK) ndata->flag -= B_LOADOK;
-  ndata->sec = sec;
-
   block_read(fs_device, sec, ndata->data);
-  ndata->flag |= B_LOADOK;
-  cacheUpdate(&ndata->elem);
+  ndata->sec = sec;
+  cacheUpdate(now);
 
-  
-
-
-  struct ahead_set* aheadWrap = malloc(sizeof(struct ahead_set));
-
- // block_sector_t *ahead_sec = malloc(sizeof(block_sector_t));
-  if(aheadWrap){
-    aheadWrap->sec = sec + 1;
-    aheadWrap->sema = &sema1;
-    thread_create("ahead_reader", PRI_DEFAULT, cacheLoadThread, aheadWrap);
-    sema_down(&sema1);
-  }
-  
+  /*
+  block_sector_t *ahead_sec = malloc(sizeof(block_sector_t));
+  if(ahead_sec){
+      *ahead_sec = sec + 1;
+    thread_create("ahead_reader", PRI_DEFAULT, cacheLoadThread, ahead_sec);
+  } */
   // still get lock
-  return ndata;
+  return now;
 }
 
 /* NOTE:
@@ -251,14 +255,16 @@ cacheLoadBlock(block_sector_t sec)
  */
 void cache_write(block_sector_t sec, const void* from)
 {
-  struct cache_e* buffer = cacheGetIdx(sec);
-  if(buffer == NULL)
-    buffer = cacheLoadBlock(sec);
+  struct list_elem* where = cacheGetIdx(sec);
+  if(where == NULL)
+    where = cacheLoadBlock(sec);
 
   // get lock by cacheGetIdx or cacheLoadBlock
+  struct cache_e* buffer = list_entry(where, struct cache_e, elem);
 
   memcpy(buffer->data, from, BLOCK_SECTOR_SIZE);
   buffer->flag |= B_DIRTY;
+
   lock_release(&buffer->cache_lock);
 }
 
@@ -275,13 +281,14 @@ void cache_write(block_sector_t sec, const void* from)
  */
 void cache_read(block_sector_t sec, void* to)
 {
-  struct cache_e* buffer = cacheGetIdx(sec);
-  if(buffer == NULL)
-    buffer = cacheLoadBlock(sec);
+  struct list_elem* where = cacheGetIdx(sec);
+  if(where == NULL)
+    where = cacheLoadBlock(sec);
 
   // get lock by cacheGetIdx or cacheLoadBlock
-  
+  struct cache_e* buffer = list_entry(where, struct cache_e, elem);
   memcpy(to, buffer->data, BLOCK_SECTOR_SIZE);
+
   lock_release(&buffer->cache_lock);
 }
 
@@ -312,8 +319,10 @@ static void oneblock_release(struct cache_e* buffer)
  * IN   | pos - list_elem* of cache
  *
  */
-static void cache_force_one(struct cache_e* buffer)
+static void cache_force_one(struct list_elem* pos)
 {
+  struct cache_e* buffer = list_entry(pos, struct cache_e, elem);
+
   if(buffer->flag & B_DIRTY){
     buffer->flag -= B_DIRTY;
     block_write(fs_device, buffer->sec, buffer->data);
@@ -343,11 +352,10 @@ void cache_flush(void)
  */
 static void cache_eviction(void)
 {
-  int try_count = 2;
+  int try_count = 4;
   while(try_count){
     struct list_elem* pos = list_rbegin(&cache);
     struct cache_e* temp = list_entry(pos, struct cache_e, elem);
-
     if(!lock_try_acquire(&temp->cache_lock))
       continue;
     if(temp->flag == B_VALID){
@@ -356,7 +364,7 @@ static void cache_eviction(void)
       return;
     }
     else {
-      cache_force_one(temp); 
+      cache_force_one(pos); 
       try_count--;
       lock_release(&temp->cache_lock);
       return;
