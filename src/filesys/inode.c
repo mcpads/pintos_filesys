@@ -15,7 +15,7 @@
 void COND_block_write(struct block* b, block_sector_t sec, const void* from)
 {
 #ifdef FILESYS
-  cache_write(b, sec, from);
+  cache_write(sec, from);
 #else
   block_write(b, sec, from);
 #endif
@@ -24,7 +24,7 @@ void COND_block_write(struct block* b, block_sector_t sec, const void* from)
 void COND_block_read(struct block* b, block_sector_t sec, void* to)
 {
 #ifdef FILESYS
-  cache_read(b, sec, to);
+  cache_read(sec, to);
 #else
   block_read(b, sec, to);
 #endif
