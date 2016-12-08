@@ -1,6 +1,11 @@
 #include "filesys/cache.h"
+#include "threads/thread.h"
+#include "devices/timer.h"
+#include "filesys/filesys.h"
+#include "threads/synch.h"
 #include <list.h>
 #include <string.h>
+
 
 enum buf_flag_t {
   B_VALID = 0x0, // 00
@@ -8,25 +13,52 @@ enum buf_flag_t {
   B_DIRTY = 0x2, // 10
 };
 
-struct buf
+
+/* Cache Entry
+ */
+
+struct cache_e
 {
-  struct block* block;
+  struct lock cache_lock; // lock
   block_sector_t sec;
   enum buf_flag_t flag; // TODO: Valid? Invalid?
   uint8_t data[BLOCK_SECTOR_SIZE];
   struct list_elem elem;
 };
 
-
 static struct list cache;
 
 // Only used for element of cache
-static struct buf _cache_buffer[MAX_CACHE_SIZE];
-// TODO: We have to maintain this struct as LRU
-//
-// Least Recently used value -> end
-// if no free slot, rbegin ~ rbegin - 1
+static struct cache_e _cache_buffer[MAX_CACHE_SIZE];
 
+
+/*
+ * cacheWriteBackThread
+ *
+ * DESC | Write all dirty data per interval. (Clock algorithm)
+ *
+ * IN   | aux - Dummy NULL pointer
+ *
+ */
+static void cacheWriteBackThread(void* aux UNUSED)
+{
+  int i;
+  while(true){
+    timer_sleep(TIMER_FREQ * 6); // TODO: HOW MUCH?
+    // since list_elem 'could' rearrange each time, we just use array.
+    
+    for(i = 0 ; i < MAX_CACHE_SIZE ; i++)    
+      if(_cache_buffer[i].flag & B_DIRTY){ 
+        if(!lock_try_acquire(&_cache_buffer[i].cache_lock))
+          continue; // is now working?
+
+        block_write(fs_device, _cache_buffer[i].sec, _cache_buffer[i].data);
+        _cache_buffer[i].flag -= B_DIRTY;
+
+        lock_release(&_cache_buffer[i].cache_lock);
+      }
+  }
+}
 
 /* 
  * cache_init
@@ -38,8 +70,11 @@ void cache_init()
 {
   int i;
   list_init(&cache);
-  for(i = 0 ; i < MAX_CACHE_SIZE ; i++)
+  for(i = 0 ; i < MAX_CACHE_SIZE ; i++){
+    lock_init(&_cache_buffer[i].cache_lock);
     list_push_back(&cache, &_cache_buffer[i].elem);
+  }
+  thread_create("cache_wb", PRI_DEFAULT, cacheWriteBackThread, NULL);
 }
 
 
@@ -49,45 +84,28 @@ void cache_init()
  * DESC | Get B_VALID cache element
  *
  * RET  | if cache is full, NULL
- *      | else last element
+ *      | else last element of (LOCKED) cache mem
  */
 static struct list_elem* 
 cacheGetFree(void)
 {
-  struct list_elem* pos = list_rbegin(&cache);
-  struct buf* buffer = list_entry(pos, struct buf, elem);
-  if(buffer->flag) // VALID
-    return NULL;
-  return pos;
-}
-
-
-/*
- * cacheGetIdx
- *
- * DESC | Get element which has same values with given
- *
- * IN   | b - given block*
- *      | sec - given sector number
- *
- * RET  | If fail, NULL
- *      | else, list_elem* of found value
- */
-static struct list_elem*
-cacheGetIdx(struct block* b, block_sector_t sec)
-{
-  struct list_elem* pos;
-  for(pos = list_begin(&cache) ;
-	  pos != list_end(&cache) ;
-	  pos = pos->next){
-    struct buf* temp = list_entry(pos, struct buf, elem);
-    if(temp->block == b && temp->sec == sec)
+  int try_count = 3;
+  while(true){
+    struct list_elem* pos = list_rbegin(&cache);
+    struct cache_e* buffer = list_entry(pos, struct cache_e, elem);
+    if(!lock_try_acquire(&buffer->cache_lock))
+      continue;
+    if(buffer->flag){
+      lock_release(&buffer->cache_lock);
+      if(try_count--) continue;
+      return NULL;
+    }
+    else {
+      buffer->flag |= B_BUSY;
       return pos;
+    }
   }
-  return NULL;
 }
-
-
 
 /*
  * cacheUpdate
@@ -105,75 +123,108 @@ cacheUpdate(struct list_elem* e)
 }
 
 
+
 /*
- * cacheUpdateFree
+ * cacheGetIdx
  *
- * DESC | Move Free value to last slot.
+ * DESC | Get element which has same values with given
  *
- * IN   | e - value that just updated (!B_VALID -> B_VALID)
+ * IN   | sec - given sector number
  *
+ * RET  | If fail, NULL
+ *      | else, list_elem* of found value
  */
-static void
-cacheUpdateFree(struct list_elem* e)
+static struct list_elem*
+cacheGetIdx(block_sector_t sec)
 {
-  list_remove(e);
-  list_push_back(&cache, e);
+  int i;
+
+  for(i = 0 ; i < MAX_CACHE_SIZE ; i++){
+    struct cache_e* temp = _cache_buffer + i;
+      
+      // list_entry(pos, struct cache_e, elem);
+    if(temp->sec == sec){
+      lock_acquire(&temp->cache_lock);
+      if(temp->sec != sec){
+        lock_release(&temp->cache_lock);
+        return NULL;
+      }
+      else{
+        cacheUpdate(&temp->elem);
+        return &temp->elem;
+      }
+    }
+  }
+  return NULL;
 }
+
 
 
 
 static void cache_eviction(void);
 
 
+static void cacheLoadThread(void* aux)
+{
+  int sector = *(block_sector_t*)aux;
+  struct list_elem* now;
+  while((now = cacheGetFree()) == NULL)
+    cache_eviction();
+
+  // get lock by cacheGetFree
+  //
+  struct cache_e* ahead = list_entry(now, struct cache_e, elem);
+
+  block_read(fs_device, sector, ahead->data);
+  ahead->sec = sector;
+  cacheUpdate(now); 
+  lock_release(&ahead->cache_lock);
+
+  free(aux);
+}
+
 /* 
  * cacheLoadBlock
  *
- * DESC | Load 2 data (Read-Ahead) from block if cache miss occur, 
- *      | and return list_elem* of block
+ * DESC | Load 2 data (Read-Ahead) from sector if cache miss occur, 
+ *      | and return list_elem* of sector
  *
- * IN   | b - given block*
- *      | sec - given sector number
+ * IN   | sec - given sector number
  *
  * RET  | list_elem* of given value
  *
- * TODO: We must use thread_create to load ahead data.
- * Will divide function to Spawn function / thread function.
  */
+
+
 static struct list_elem*
-cacheLoadBlock(struct block* b, block_sector_t sec)
+cacheLoadBlock(block_sector_t sec)
 {
   struct list_elem* now;
   while((now = cacheGetFree()) == NULL)
     cache_eviction(); 
 
-
-  struct list_elem* ahead = now->prev;
-  struct buf* ndata = list_entry(now, struct buf, elem);
-  struct buf* adata = list_entry(ahead, struct buf, elem);
+  struct cache_e* ndata = list_entry(now, struct cache_e, elem);
   // Block read
   
-  block_read(b, sec, ndata->data);
-
-  ndata->flag |= B_BUSY;
-  ndata->block = b;
+  // get lock by cacheGetFree
+  //
+  block_read(fs_device, sec, ndata->data);
   ndata->sec = sec;
-
-  block_read(b, sec+1, adata->data);
-
-  adata->flag |= B_BUSY;
-  adata->block = b;
-  adata->sec = sec+1;
-  
-  cacheUpdate(ahead);
   cacheUpdate(now);
 
+  block_sector_t *ahead_sec = malloc(sizeof(block_sector_t));
+  if(ahead_sec){
+      *ahead_sec = sec + 1;
+    thread_create("ahead_reader", PRI_DEFAULT, cacheLoadThread, ahead_sec);
+  }
+  // still get lock
   return now;
 }
 
 /* NOTE:
  * every function that use read/write function will take 
- * buf size >= BLOCK_SECTOR_SIZE with bounce.
- * Do not have to care about buf size. 
+ * cache_e size >= BLOCK_SECTOR_SIZE with bounce.
+ * Do not have to care about cache_e size. 
  */
 
 
@@ -183,24 +234,23 @@ cacheLoadBlock(struct block* b, block_sector_t sec)
  * DESC | Write Data 'from' and other extra field to valid cache.
  *      | Then, Update Cache(MRU), mark (BUSY | DIRTY) flag.
  *
- * IN   | b - given block
- *      | sec - given sector number
+ * IN   | sec - given sector number
  *      | from - caller's data
  *
  */
-void cache_write(struct block* b, block_sector_t sec, const void* from)
-{ 
-  struct list_elem* where = cacheGetIdx(b, sec);
+void cache_write(block_sector_t sec, const void* from)
+{
+  struct list_elem* where = cacheGetIdx(sec);
   if(where == NULL)
-    where = cacheLoadBlock(b, sec);
+    where = cacheLoadBlock(sec);
 
-  struct buf* buffer = list_entry(where, struct buf, elem);
-
-  buffer->flag |= B_DIRTY;
+  // get lock by cacheGetIdx or cacheLoadBlock
+  struct cache_e* buffer = list_entry(where, struct cache_e, elem);
 
   memcpy(buffer->data, from, BLOCK_SECTOR_SIZE);
+  buffer->flag |= B_DIRTY;
 
-  cacheUpdate(where);
+  lock_release(&buffer->cache_lock);
 }
 
 
@@ -210,43 +260,24 @@ void cache_write(struct block* b, block_sector_t sec, const void* from)
  * DESC | Write cache to Data 'to', and fill extra field to valid cache.
  *      | Then, Update Cache(MRU), mark BUSY flag.
  *
- * IN   | b - given block
- *      | sec - given sector number
+ * IN   | sec - given sector number
  *      | to - caller's data
  *
  */
-void cache_read(struct block* b, block_sector_t sec, void* to)
+void cache_read(block_sector_t sec, void* to)
 {
-  struct list_elem* where = cacheGetIdx(b, sec);
+  struct list_elem* where = cacheGetIdx(sec);
   if(where == NULL)
-    where = cacheLoadBlock(b, sec);
+    where = cacheLoadBlock(sec);
 
-  struct buf* buffer = list_entry(where, struct buf, elem);
-
+  // get lock by cacheGetIdx or cacheLoadBlock
+  struct cache_e* buffer = list_entry(where, struct cache_e, elem);
   memcpy(to, buffer->data, BLOCK_SECTOR_SIZE);
 
-  cacheUpdate(where);
+  lock_release(&buffer->cache_lock);
 }
 
-/*
- * cache_writeback
- *
- * DESC | Find cache that has given values. Then block_write to block.
- *
- * IN   | b - given block
- *      | sec - given sector number
- *
- * TODO: Multi-thread
- */
-void cache_writeback(struct block* b, block_sector_t sec)
-{
-  struct list_elem* pos = cacheGetIdx(b, sec);
-  if(pos != NULL){
-    struct buf* buffer = list_entry(pos, struct buf, elem);
-    if(buffer->flag & B_DIRTY) return;
-    block_write(b, sec, buffer->data);
-  }
-}
+
 
 /*
  * oneblock_init
@@ -256,12 +287,11 @@ void cache_writeback(struct block* b, block_sector_t sec)
  * IN   | buffer - given buffer
  *
  */
-static void oneblock_init(struct buf* buffer)
+static void oneblock_release(struct cache_e* buffer)
 {
-  buffer->block = NULL;
   buffer->sec = 0;
   buffer->flag = B_VALID;
-  memset(buffer->data, 0, BLOCK_SECTOR_SIZE); // Really have to do?
+//  memset(buffer->data, 0, BLOCK_SECTOR_SIZE); // Really have to do?
 }
 
 
@@ -276,12 +306,13 @@ static void oneblock_init(struct buf* buffer)
  */
 static void cache_force_one(struct list_elem* pos)
 {
-  struct buf* buffer = list_entry(pos, struct buf, elem);
+  struct cache_e* buffer = list_entry(pos, struct cache_e, elem);
 
-  if(buffer->flag & B_DIRTY)
-    block_write(buffer->block, buffer->sec, buffer->data);
-
-  oneblock_init(buffer);
+  if(buffer->flag & B_DIRTY){
+    buffer->flag -= B_DIRTY;
+    block_write(fs_device, buffer->sec, buffer->data);
+  }
+  oneblock_release(buffer);
 }
 
 /*
@@ -292,24 +323,33 @@ static void cache_force_one(struct list_elem* pos)
  */
 void cache_flush(void)
 {
-  struct list_elem* pos;
-  for(pos = list_begin(&cache) ; 
-      pos != list_end(&cache);
-      pos = pos->next)
-    cache_force_one(pos);
+  int i;
+//  for(i = 0 ; i < MAX_CACHE_SIZE ; i++)
+//    cache_force_one(&_cache_buffer[i].elem);
 }
 
 
 /* 
  * cache_eviction 
  *
- * DESC | clear 2 element of list by LRU algorithm
+ * DESC | clear element of list by LRU algorithm
  *
  */
 static void cache_eviction(void)
 {
-  struct list_elem* pos = list_rbegin(&cache);
-  struct list_elem* n = pos->prev;
-  cache_force_one(pos);
-  cache_force_one(n);
+  while(true){
+    struct list_elem* pos = list_rbegin(&cache);
+    struct cache_e* temp = list_entry(pos, struct cache_e, elem);
+    if(!lock_try_acquire(&temp->cache_lock))
+      continue;
+    if(temp->flag == B_VALID){
+      lock_release(&temp->cache_lock);
+      return;
+    }
+    else {
+      cache_force_one(pos); 
+      lock_release(&temp->cache_lock);
+      return;
+    }
+  }
 }

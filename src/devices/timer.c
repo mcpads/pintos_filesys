@@ -30,11 +30,15 @@ static void busy_wait (int64_t loops);
 static void real_time_sleep (int64_t num, int32_t denom);
 static void real_time_delay (int64_t num, int32_t denom);
 
+
+static struct list sleep_thread_list;
+
 /* Sets up the timer to interrupt TIMER_FREQ times per second,
    and registers the corresponding interrupt. */
 void
 timer_init (void) 
 {
+  list_init(&sleep_thread_list);
   pit_configure_channel (0, 2, TIMER_FREQ);
   intr_register_ext (0x20, timer_interrupt, "8254 Timer");
 }
@@ -84,17 +88,44 @@ timer_elapsed (int64_t then)
   return timer_ticks () - then;
 }
 
+// psw: this compare function is used in insert something in sleep thread list.
+
+static bool wakeupcomp(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED)
+{
+  struct thread* ta = list_entry(a, struct thread, wakeupelem);
+  struct thread* tb = list_entry(b, struct thread, wakeupelem);
+  return ta->wakeup < tb->wakeup;
+}
+
+
 /* Sleeps for approximately TICKS timer ticks.  Interrupts must
    be turned on. */
-void
+
+  void
 timer_sleep (int64_t ticks) 
 {
+  enum intr_level old_level;
+  struct thread *cur = thread_current();
   int64_t start = timer_ticks ();
+  // TODO: does have to check system idle?
 
-  ASSERT (intr_get_level () == INTR_ON);
-  while (timer_elapsed (start) < ticks) 
-    thread_yield ();
+  ASSERT (intr_get_level () == INTR_ON); 
+
+
+  // save when this thread have to wakeup in thread structure.
+  cur->wakeup = start + ticks;
+  // add in sleep thread list.
+  list_insert_ordered(&sleep_thread_list, &cur->wakeupelem, wakeupcomp, NULL);
+
+  // set interrupt disable & blocking
+  old_level = intr_disable();
+  thread_block();
+  intr_set_level(old_level);
+
+
 }
+
+
 
 /* Sleeps for approximately MS milliseconds.  Interrupts must be
    turned on. */
@@ -165,12 +196,34 @@ timer_print_stats (void)
 {
   printf ("Timer: %"PRId64" ticks\n", timer_ticks ());
 }
-
+
+void wakeup_thread(void)
+{
+  int now = ticks;
+  struct list_elem* cur;
+  struct list_elem* next;
+  struct thread* tcur;
+  if(list_empty(&sleep_thread_list)) return;
+
+  for(cur = list_begin (&sleep_thread_list) ; cur != list_end (&sleep_thread_list) ; cur = next){
+    tcur = list_entry(cur, struct thread, wakeupelem);
+    if(tcur->wakeup <= now){
+      next = cur->next;
+      // remove from sleep list
+      list_remove(cur);
+      // insert in ready queue
+      thread_unblock(tcur);
+    }
+    else break;
+  }
+}
 /* Timer interrupt handler. */
-static void
+  static void
 timer_interrupt (struct intr_frame *args UNUSED)
 {
   ticks++;
+
+  wakeup_thread();
   thread_tick ();
 }
 
