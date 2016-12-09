@@ -45,7 +45,7 @@ static void cacheWriteBackThread(void* aux UNUSED)
 {
   int i;
   while(true){
-    timer_sleep(TIMER_FREQ * 6); // TODO: HOW MUCH?
+    timer_sleep(TIMER_FREQ * 10); // TODO: HOW MUCH?
     // since list_elem 'could' rearrange each time, we just use array.
     
     for(i = 0 ; i < MAX_CACHE_SIZE ; i++)    
@@ -93,6 +93,7 @@ cacheGetFree(void)
   for(i = 0 ; i < MAX_CACHE_SIZE ; i++){
     if(_cache_buffer[i].flag
         || !lock_try_acquire(&_cache_buffer[i].cache_lock)) continue;
+    _cache_buffer[i].flag |= B_BUSY;
     return _cache_buffer + i;
   }
   return NULL;
@@ -164,6 +165,14 @@ static void cacheLoadThread(void* aux)
   free(aux);
 
   struct cache_e* ahead;
+
+
+  if(ahead = cacheGetIdx(aheadWrap.sec)){
+    lock_release(&ahead->cache_lock);
+    sema_up(aheadWrap.sema);
+    thread_exit();
+  }
+  
   while((ahead = cacheGetFree()) == NULL)
     cache_eviction();
 
@@ -172,14 +181,16 @@ static void cacheLoadThread(void* aux)
   ahead->sec = aheadWrap.sec;
   sema_up(aheadWrap.sema);
   
-  if(ahead->flag & B_LOADOK) ahead->flag -= B_LOADOK;
+//  if(ahead->flag & B_LOADOK) ahead->flag -= B_LOADOK;
 
   block_read(fs_device, aheadWrap.sec, ahead->data);
   cacheUpdate(&ahead->elem); 
 
-  ahead->flag |= B_LOADOK;
+//  ahead->flag |= B_LOADOK;
 
   lock_release(&ahead->cache_lock);
+
+  thread_exit();
 }
 
 /* 
@@ -208,15 +219,12 @@ cacheLoadBlock(block_sector_t sec)
     // get lock by cacheGetFree
   //
  
-  if(ndata->flag & B_LOADOK) ndata->flag -= B_LOADOK;
+//  if(ndata->flag & B_LOADOK) ndata->flag -= B_LOADOK;
   ndata->sec = sec;
 
   block_read(fs_device, sec, ndata->data);
-  ndata->flag |= B_LOADOK;
+//  ndata->flag |= B_LOADOK;
   cacheUpdate(&ndata->elem);
-
-  
-
 
   struct ahead_set* aheadWrap = malloc(sizeof(struct ahead_set));
 
@@ -227,7 +235,7 @@ cacheLoadBlock(block_sector_t sec)
     thread_create("ahead_reader", PRI_DEFAULT, cacheLoadThread, aheadWrap);
     sema_down(&sema1);
   }
-  
+ 
   // still get lock
   return ndata;
 }
