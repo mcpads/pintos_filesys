@@ -414,6 +414,7 @@ syscall_write (int fd, const void *buffer, unsigned length)
   lock_acquire(&filesys_lock);
   t = file_write(file_of_fd(fd), buffer, length);
   lock_release(&filesys_lock);
+//printf ("write_t: %d\n",t);
   return t;
 }
 
@@ -434,6 +435,7 @@ syscall_tell (int fd)
   lock_release(&filesys_lock);
   t = file_tell(file_of_fd(fd));
   lock_release(&filesys_lock);
+//printf ("tell_t: %d\n", t);
   return t;
 }
 
