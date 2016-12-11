@@ -36,6 +36,7 @@
 #include "devices/ide.h"
 #include "filesys/filesys.h"
 #include "filesys/fsutil.h"
+#include "filesys/cache.h"
 #endif
 
 /* Page directory with kernel mappings only. */
@@ -133,6 +134,10 @@ main (void)
   run_actions (argv);
 
   /* Finish up. */
+  // NOTE: cache_flush execute in this time
+#ifdef FILESYS
+  cache_flush();
+#endif
   shutdown ();
   thread_exit ();
 }

@@ -450,34 +450,29 @@ syscall_close (int fd)
 bool 
 syscall_chdir(const char* dir)
 {
-
+  return true;
 }
 
 bool
 syscall_mkdir(const char* dir)
 {
-
-
+  return true;
 }
 
 bool
 syscall_readdir(int fd, char* name)
 {
-
-
+  return true;
 }
 
 bool 
 syscall_isdir(int fd)
 {
-
-
+  return true;
 }
 
 int 
 syscall_inumber(int fd)
 {
-
-
-
+  return -1;
 }
