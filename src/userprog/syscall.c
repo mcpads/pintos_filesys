@@ -26,7 +26,7 @@
 
 #define CHECK_VALID_READ_FD(fd) USERASSERT(file_of_fd(fd) || fd == STDIN_FILENO)
 
-#define USER_BASE_ADDR 0x08048000
+#define USER_BASE_ADDR ((void *)0x08048000)
 
 // note that vaddr must not be func(args)
 #define CHECK_VALID_USERADDR(vaddr) USERASSERT((is_user_vaddr(vaddr) && USER_BASE_ADDR < (vaddr)) && pagedir_get_page(thread_current()->pagedir, vaddr) != NULL )
@@ -187,7 +187,7 @@ syscall_handler (struct intr_frame *f)
       break;
     case SYS_TELL:                  /* Report current position in a file. */
       USERASSERT(is_user_vaddr(f->esp + 4));
-      syscall_tell(SYSCALL_NTH_ARG(f, 1, int));
+      f->eax = syscall_tell(SYSCALL_NTH_ARG(f, 1, int));
       break;
     case SYS_CLOSE:                  /* Close a file. */
       USERASSERT(is_user_vaddr(f->esp + 4));
@@ -200,25 +200,25 @@ syscall_handler (struct intr_frame *f)
     case SYS_CHDIR:
       USERASSERT(is_user_vaddr(f->esp + 4));
       CHECK_VALID_USERADDR(SYSCALL_NTH_ARG(f, 1, char*));
-      syscall_chdir(SYSCALL_NTH_ARG(f, 1, char*));
+      f->eax = syscall_chdir(SYSCALL_NTH_ARG(f, 1, char*));
       break;
     case SYS_MKDIR:
       USERASSERT(is_user_vaddr(f->esp + 4));
       CHECK_VALID_USERADDR(SYSCALL_NTH_ARG(f, 1, char*));
-      syscall_mkdir(SYSCALL_NTH_ARG(f, 1, char*));
+      f->eax = syscall_mkdir(SYSCALL_NTH_ARG(f, 1, char*));
       break;
     case SYS_READDIR:
       USERASSERT(is_user_vaddr(f->esp + 8));
       CHECK_VALID_USERADDR(SYSCALL_NTH_ARG(f, 2, char*));
-      syscall_readdir(SYSCALL_NTH_ARG(f, 1, int), SYSCALL_NTH_ARG(f, 2, char*));
+      f->eax = syscall_readdir(SYSCALL_NTH_ARG(f, 1, int), SYSCALL_NTH_ARG(f, 2, char*));
       break;
     case SYS_ISDIR: 
       USERASSERT(is_user_vaddr(f->esp + 4));
-      syscall_isdir(SYSCALL_NTH_ARG(f, 1, int));
+      f->eax = syscall_isdir(SYSCALL_NTH_ARG(f, 1, int));
       break;
     case SYS_INUMBER: 
       USERASSERT(is_user_vaddr(f->esp + 4));
-      syscall_inumber(SYSCALL_NTH_ARG(f, 1, int));
+      f->eax = syscall_inumber(SYSCALL_NTH_ARG(f, 1, int));
       break;
     default:
       printf ("Unknown System-Call");
@@ -254,7 +254,6 @@ pid_t syscall_exec (const char *file)
 {
   pid_t t;
   USERASSERT(file);
-
   lock_acquire(&filesys_lock);
   t = process_execute(file);
   lock_release(&filesys_lock);
@@ -414,6 +413,7 @@ syscall_write (int fd, const void *buffer, unsigned length)
   lock_acquire(&filesys_lock);
   t = file_write(file_of_fd(fd), buffer, length);
   lock_release(&filesys_lock);
+//printf ("write_t: %d\n",t);
   return t;
 }
 
@@ -431,9 +431,10 @@ syscall_tell (int fd)
 {
   unsigned t;
   CHECK_VALID_FD(fd);
-  lock_release(&filesys_lock);
+  lock_acquire(&filesys_lock);
   t = file_tell(file_of_fd(fd));
   lock_release(&filesys_lock);
+  // printf ("tell_t: %d\n", t);
   return t;
 }
 

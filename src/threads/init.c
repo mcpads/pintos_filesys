@@ -134,10 +134,6 @@ main (void)
   run_actions (argv);
 
   /* Finish up. */
-  // NOTE: cache_flush execute in this time
-#ifdef FILESYS
-  cache_flush();
-#endif
   shutdown ();
   thread_exit ();
 }

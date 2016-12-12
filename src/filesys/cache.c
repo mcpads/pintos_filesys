@@ -11,16 +11,25 @@ enum buf_flag_t {
   B_VALID = 0x0, // 00
   B_BUSY = 0x1, // 01
   B_DIRTY = 0x2, // 10
-  B_LOADOK = 0x4
+  B_WRITER = 0x4
 };
 
 
 /* Cache Entry
+ *
+ *
+ * TODO: write read condition
+ *
  */
 
 struct cache_e
 {
-  struct lock cache_lock; // lock
+  struct lock rw_lock;
+  struct condition rw_cond;
+  int reader_count;
+
+  struct lock cache_lock; // for get free cache
+
   block_sector_t sec;
   enum buf_flag_t flag; // TODO: Valid? Invalid?
   uint8_t data[BLOCK_SECTOR_SIZE];
@@ -32,72 +41,6 @@ static struct list cache;
 // Only used for element of cache
 static struct cache_e _cache_buffer[MAX_CACHE_SIZE];
 
-
-/*
- * cacheWriteBackThread
- *
- * DESC | Write all dirty data per interval. (Clock algorithm)
- *
- * IN   | aux - Dummy NULL pointer
- *
- */
-static void cacheWriteBackThread(void* aux UNUSED)
-{
-  int i;
-  while(true){
-    timer_sleep(TIMER_FREQ * 10); // TODO: HOW MUCH?
-    // since list_elem 'could' rearrange each time, we just use array.
-    
-    for(i = 0 ; i < MAX_CACHE_SIZE ; i++)    
-      if(_cache_buffer[i].flag & B_DIRTY){ 
-        if(!lock_try_acquire(&_cache_buffer[i].cache_lock))
-          continue; // is now working?
-
-        block_write(fs_device, _cache_buffer[i].sec, _cache_buffer[i].data);
-        _cache_buffer[i].flag -= B_DIRTY;
-
-        lock_release(&_cache_buffer[i].cache_lock);
-      }
-  }
-}
-
-/* 
- * cache_init
- *
- * DESC | Initialize cache in first time.
- *
- */
-void cache_init()
-{
-  int i;
-  list_init(&cache);
-  for(i = 0 ; i < MAX_CACHE_SIZE ; i++){
-    lock_init(&_cache_buffer[i].cache_lock);
-    list_push_back(&cache, &_cache_buffer[i].elem);
-  }
-  thread_create("cache_wb", PRI_DEFAULT, cacheWriteBackThread, NULL);
-}
-
-/*
- * cacheGetFree
- *
- * DESC | Get B_VALID cache element
- *
- * RET  | if cache is full, NULL
- *      | else last element of (LOCKED) cache mem
- */
-static struct cache_e* 
-cacheGetFree(void)
-{
-  int i;
-  for(i = 0 ; i < MAX_CACHE_SIZE ; i++){
-    if(_cache_buffer[i].flag
-        || !lock_try_acquire(&_cache_buffer[i].cache_lock)) continue;
-    _cache_buffer[i].flag |= B_BUSY;
-    return _cache_buffer + i;
-  }
-  return NULL;
-}
 
 /*
  * cacheUpdate
@@ -115,6 +58,129 @@ cacheUpdate(struct list_elem* e)
 }
 
 
+
+
+void cache_write_acquire(struct cache_e* c)
+{
+  lock_acquire(&c->rw_lock);
+
+  while((c->flag & B_WRITER) ||
+	  c->reader_count > 0)
+    cond_wait(&c->rw_cond, &c->rw_lock);
+  
+  c->flag |= B_WRITER;
+
+  lock_release(&c->rw_lock);
+}
+
+void cache_write_release(struct cache_e* c)
+{
+
+  lock_acquire(&c->rw_lock);
+  ASSERT(c->flag & B_WRITER);
+  c->flag -= B_WRITER;
+
+  cond_broadcast(&c->rw_cond, &c->rw_lock);
+  lock_release(&c->rw_lock);
+}
+
+void cache_read_acquire(struct cache_e* c)
+{
+  lock_acquire(&c->rw_lock);
+
+  while(c->flag & B_WRITER)
+    cond_wait(&c->rw_cond, &c->rw_lock);
+  c->reader_count++;
+
+  lock_release(&c->rw_lock);
+}
+
+void cache_read_release(struct cache_e* c)
+{
+  lock_acquire(&c->rw_lock);
+
+  ASSERT(c->reader_count > 0);
+  if(--c->reader_count == 0)
+    cond_signal(&c->rw_cond, &c->rw_lock);
+
+  lock_release(&c->rw_lock);
+}
+
+
+/*
+ * cacheWriteBackThread
+ *
+ * DESC | Write all dirty data per interval. (Clock algorithm)
+ *
+ * IN   | aux - Dummy NULL pointer
+ *
+ */
+static void cacheWriteBackThread(void* aux UNUSED)
+{
+  int i;
+  while(true){
+    timer_sleep(TIMER_FREQ * 10); // TODO: HOW MUCH?
+    // since list_elem 'could' rearrange each time, we just use array.
+    
+    for(i = 0 ; i < MAX_CACHE_SIZE ; i++) {
+      cache_read_acquire(_cache_buffer + i);
+      if(_cache_buffer[i].flag & B_DIRTY){ 
+        block_write(fs_device, _cache_buffer[i].sec, _cache_buffer[i].data);
+        _cache_buffer[i].flag -= B_DIRTY;
+      }
+      cache_read_release(_cache_buffer + i);
+    }
+  }
+}
+
+/* 
+ * cache_init
+ *
+ * DESC | Initialize cache in first time.
+ *
+ */
+void cache_init()
+{
+  int i;
+  list_init(&cache);
+  for(i = 0 ; i < MAX_CACHE_SIZE ; i++){
+    lock_init(&_cache_buffer[i].cache_lock);
+    lock_init(&_cache_buffer[i].rw_lock);
+    cond_init(&_cache_buffer[i].rw_cond);
+
+    _cache_buffer[i].reader_count = 0;
+
+    list_push_back(&cache, &_cache_buffer[i].elem);
+  }
+  thread_create("cache_wb", PRI_DEFAULT, cacheWriteBackThread, NULL);
+}
+
+
+
+
+/*
+ * cacheGetFree
+ *
+ * DESC | Get B_VALID cache element
+ *
+ * RET  | if cache is full, NULL
+ *      | else last element of (LOCKED) cache mem
+ */
+static struct cache_e* 
+cacheGetFree(void)
+{
+  int i;
+  for(i = 0 ; i < MAX_CACHE_SIZE ; i++){
+    if(_cache_buffer[i].flag
+        || !lock_try_acquire(&_cache_buffer[i].cache_lock)) continue;
+    _cache_buffer[i].flag |= B_BUSY;
+    cacheUpdate(&_cache_buffer[i].elem);
+
+    lock_release(&_cache_buffer[i].cache_lock);
+    return _cache_buffer + i;
+  }
+  return NULL;
+}
 
 /*
  * cacheGetIdx
@@ -142,6 +208,7 @@ cacheGetIdx(block_sector_t sec)
       }
       else{
         cacheUpdate(&temp->elem);
+	lock_release(&temp->cache_lock);
         return temp;
       }
     }
@@ -168,7 +235,6 @@ static void cacheLoadThread(void* aux)
 
 
   if(ahead = cacheGetIdx(aheadWrap.sec)){
-    lock_release(&ahead->cache_lock);
     sema_up(aheadWrap.sema);
     thread_exit();
   }
@@ -176,19 +242,15 @@ static void cacheLoadThread(void* aux)
   while((ahead = cacheGetFree()) == NULL)
     cache_eviction();
 
-  // get lock by cacheGetFree
-  //
   ahead->sec = aheadWrap.sec;
   sema_up(aheadWrap.sema);
-  
-//  if(ahead->flag & B_LOADOK) ahead->flag -= B_LOADOK;
+
+  cache_write_acquire(ahead);
 
   block_read(fs_device, aheadWrap.sec, ahead->data);
-  cacheUpdate(&ahead->elem); 
+  cache_write_release(ahead);
 
-//  ahead->flag |= B_LOADOK;
-
-  lock_release(&ahead->cache_lock);
+  cacheUpdate(&ahead->elem);
 
   thread_exit();
 }
@@ -216,19 +278,16 @@ cacheLoadBlock(block_sector_t sec)
   while((ndata = cacheGetFree()) == NULL)
     cache_eviction(); 
 
-    // get lock by cacheGetFree
-  //
- 
-//  if(ndata->flag & B_LOADOK) ndata->flag -= B_LOADOK;
+
   ndata->sec = sec;
 
+  cache_write_acquire(ndata);
   block_read(fs_device, sec, ndata->data);
-//  ndata->flag |= B_LOADOK;
+  cache_write_release(ndata);
   cacheUpdate(&ndata->elem);
 
   struct ahead_set* aheadWrap = malloc(sizeof(struct ahead_set));
 
- // block_sector_t *ahead_sec = malloc(sizeof(block_sector_t));
   if(aheadWrap){
     aheadWrap->sec = sec + 1;
     aheadWrap->sema = &sema1;
@@ -264,10 +323,11 @@ void cache_write(block_sector_t sec, const void* from)
     buffer = cacheLoadBlock(sec);
 
   // get lock by cacheGetIdx or cacheLoadBlock
-
+  cache_write_acquire(buffer);
   memcpy(buffer->data, from, BLOCK_SECTOR_SIZE);
   buffer->flag |= B_DIRTY;
-  lock_release(&buffer->cache_lock);
+  cacheUpdate(&buffer->elem);
+  cache_write_release(buffer);
 }
 
 
@@ -289,8 +349,10 @@ void cache_read(block_sector_t sec, void* to)
 
   // get lock by cacheGetIdx or cacheLoadBlock
   
+  cache_read_acquire(buffer);
   memcpy(to, buffer->data, BLOCK_SECTOR_SIZE);
-  lock_release(&buffer->cache_lock);
+  cacheUpdate(&buffer->elem);
+  cache_read_release(buffer);
 }
 
 
@@ -307,6 +369,7 @@ static void oneblock_release(struct cache_e* buffer)
 {
   buffer->sec = 0;
   buffer->flag = B_VALID;
+  buffer->reader_count = 0;
 //  memset(buffer->data, 0, BLOCK_SECTOR_SIZE); // Really have to do?
 }
 
@@ -320,13 +383,20 @@ static void oneblock_release(struct cache_e* buffer)
  * IN   | pos - list_elem* of cache
  *
  */
-static void cache_force_one(struct cache_e* buffer)
+static bool cache_force_one(struct cache_e* buffer, bool force)
 {
+
+  if(!force && (buffer->flag & B_WRITER
+      || buffer->reader_count > 0)) return false;
+
   if(buffer->flag & B_DIRTY){
     buffer->flag -= B_DIRTY;
     block_write(fs_device, buffer->sec, buffer->data);
   }
   oneblock_release(buffer);
+  
+  return true;
+
 }
 
 /*
@@ -338,8 +408,8 @@ static void cache_force_one(struct cache_e* buffer)
 void cache_flush(void)
 {
   int i;
-//  for(i = 0 ; i < MAX_CACHE_SIZE ; i++)
-//    cache_force_one(&_cache_buffer[i].elem);
+  for(i = 0 ; i < MAX_CACHE_SIZE ; i++)
+    cache_force_one(&_cache_buffer[i].elem, true);
 }
 
 
@@ -351,23 +421,28 @@ void cache_flush(void)
  */
 static void cache_eviction(void)
 {
-  int try_count = 2;
-  while(try_count){
-    struct list_elem* pos = list_rbegin(&cache);
+  struct list_elem* pos = list_rbegin(&cache);
+  while(true){
     struct cache_e* temp = list_entry(pos, struct cache_e, elem);
 
     if(!lock_try_acquire(&temp->cache_lock))
       continue;
     if(temp->flag == B_VALID){
-      try_count--;
       lock_release(&temp->cache_lock);
       return;
     }
     else {
-      cache_force_one(temp); 
-      try_count--;
+      if(cache_force_one(temp, false)){
+	if(pos == list_rbegin(&cache))
+	  pos = pos->prev;
+	else
+	  pos = list_rbegin(&cache);
+	lock_release(&temp->cache_lock);
+	continue;
+      }
       lock_release(&temp->cache_lock);
       return;
     }
+
   }
 }

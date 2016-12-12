@@ -1,0 +1,25 @@
+../utils/pintos -v -k -T 60 --qemu  --filesys-size=2 -p
+./build/tests/userprog/read-boundary -a read-boundary -p
+../tests/userprog/sample.txt -a sample.txt --swap-size=4 -- -q  -f run
+read-boundary < /dev/null 2>  ./build/tests/userprog/read-boundary.errors
+
+../utils/pintos -v --gdb -k -T 60 --qemu  --filesys-size=2 -p
+build/tests/userprog/args-none -a args-none -- -q  -f run args-none
+
+../utils/pintos -v --gdb -k -T 60 --qemu  --filesys-size=2 -p
+build/tests/userprog/args-many -a args-many -- -q  -f run 'args-many a b c d e f
+g h i j k l m n o p q r s t u v'
+
+../utils/pintos -v --gdb -k -T 60 --qemu  --filesys-size=2 -p
+build/tests/userprog/create-normal -a create-normal -- -q  -f run create-normal
+
+../utils/pintos-gdb build/kernel.o
+
+../utils/pintos-mkdisk tmp.dsk --filesys-size=2
+
+../utils/pintos -v --gdb -k -T 60 --qemu  --disk=tmp.dsk -p
+build/tests/filesys/extended/grow-tell -a grow-tell -p
+build/tests/filesys/extended/tar -a tar -- -q  -f run grow-tell
+
+../utils/pintos -v -k -T 60  --qemu --disk=tmp.dsk -g fs.tar -a
+build/tests/filesys/extended/grow-tell.tar -- -q  run 'tar fs.tar /' 

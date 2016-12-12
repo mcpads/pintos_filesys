@@ -18,6 +18,7 @@ static void
 check_tell (int fd, long ofs) 
 {
   long pos = tell (fd);
+//  msg ("pos:%d, ofs: %d\n", pos, ofs);
   if (pos != ofs)
     fail ("file position not updated properly: should be %ld, actually %ld",
           ofs, pos);
