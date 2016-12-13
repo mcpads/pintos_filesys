@@ -7,6 +7,7 @@
 #include "filesys/free-map.h"
 #include "threads/malloc.h"
 #include "filesys/cache.h"
+#include "devices/block.h"
 
 /* Identifies an inode. */
 #define INODE_MAGIC 0x494e4f44
@@ -504,9 +505,17 @@ inode_read_at (struct inode *inode, void *buffer_, off_t size, off_t offset)
   off_t bytes_read = 0;
   uint8_t *bounce = NULL;
 
+  if (inode->sector == 0) 
+    {
+//printf ("size: %d, off: %d, len: %d, by: %d, inode_sec: %d\n", size, offset, inode_length(inode), bytes_read, inode->sector);
+//      COND_block_read (fs_device, inode->sector, buffer);
+//      return size;
+    }
+
   while (size > 0) 
   {
-    if (offset > inode->data.length) break;
+    if (offset > inode->data.length && inode->sector != 0) break;
+
     /* Disk sector to read, starting byte offset within sector. */
     block_sector_t sector_idx = byte_to_sector (inode, offset);
     int sector_ofs = offset % BLOCK_SECTOR_SIZE;
@@ -569,9 +578,9 @@ inode_write_at (struct inode *inode, const void *buffer_, off_t size,
   off_t bytes_written = 0;
   uint8_t *bounce = NULL;
 
-  if (inode->deny_write_cnt)
+  if (inode->deny_write_cnt || fs_device == block_size (fs_device))
     return 0;
-  //printf ("entered!!\n");
+
   // Filling with zeros within gap
   if (offset + size > inode_length (inode))
   {
@@ -580,11 +589,10 @@ inode_write_at (struct inode *inode, const void *buffer_, off_t size,
     if (!allocate_inode_data (&inode->data, sectors, start)) ASSERT (0);
     inode->data.length += offset - inode->data.length + size;
     COND_block_write (fs_device, inode->sector, &inode->data);
-    //printf ("off+isze: %d, legnth: %d, start: %d, sectors: %d\n", offset+size, inode_length(inode), start, sectors);
   }
+
   while (size > 0) 
   {
-    // printf ("offset: %d, size: %d, length: %d\n", offset, size, inode_length(inode));
     /* Sector to write, starting byte offset within sector. */
     block_sector_t sector_idx = byte_to_sector (inode, offset);
     ASSERT (sector_idx != -1);
@@ -631,7 +639,6 @@ inode_write_at (struct inode *inode, const void *buffer_, off_t size,
     size -= chunk_size;
     offset += chunk_size;
     bytes_written += chunk_size;
-    //printf ("bytes_written: %d, chunk_size: %d\n", bytes_written, chunk_size);
   }
   free (bounce);
 

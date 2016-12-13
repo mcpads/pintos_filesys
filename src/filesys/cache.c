@@ -5,7 +5,7 @@
 #include "threads/synch.h"
 #include <list.h>
 #include <string.h>
-
+#include "filesys/inode.h"
 
 enum buf_flag_t {
   B_VALID = 0x0, // 00
@@ -402,6 +402,8 @@ static bool cache_force_one(struct cache_e* buffer, bool force)
       || buffer->reader_count > 0)) return false;
 
   if(buffer->flag & B_DIRTY){
+//if (buffer->sec != 0)
+//printf ("buffer->sec: %d\n", buffer->sec);
     buffer->flag -= B_DIRTY;
     block_write(fs_device, buffer->sec, buffer->data);
   }

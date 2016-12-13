@@ -36,10 +36,10 @@ filesys_init (bool format)
 void
 filesys_done (void) 
 {
-  free_map_close ();
 #ifdef FILESYS
   cache_flush();
 #endif
+  free_map_close ();
 }
 
 struct dir* dir_of_name(char* s)
