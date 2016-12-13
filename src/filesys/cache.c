@@ -149,6 +149,7 @@ void cache_init()
     cond_init(&_cache_buffer[i].rw_cond);
 
     _cache_buffer[i].reader_count = 0;
+    _cache_buffer[i].sec = -1;
 
     list_push_back(&cache, &_cache_buffer[i].elem);
   }
@@ -378,7 +379,7 @@ void cache_read(block_sector_t sec, void* to)
  */
 static void oneblock_release(struct cache_e* buffer)
 {
-  buffer->sec = 0;
+  buffer->sec = -1;
   buffer->flag = B_VALID;
   buffer->reader_count = 0;
 //  memset(buffer->data, 0, BLOCK_SECTOR_SIZE); // Really have to do?
