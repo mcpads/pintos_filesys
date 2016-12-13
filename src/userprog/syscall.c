@@ -425,8 +425,11 @@ syscall_chdir(const char* dir)
   struct dir* this_dir = filesys_chdir(dir);
   if(!this_dir)
     return false;
-  else
+  else{
+    if(thread_current()->current_dir)
+      dir_close(thread_current()->current_dir);
     thread_current()->current_dir = this_dir;
+  }
   return true; 
 }
 

@@ -207,9 +207,13 @@ filesys_chdir (const char *name)
       inode = inode_open(directory_get_parent(dir));
       dir_close(dir);
       dir = dir_open(inode);
+      free(temp);
+      return dir;
     }
-    else if(!strcmp(filename, "."))
-      return dir_reopen(dir);
+    else if(!strcmp(filename, ".")){
+      free(temp);
+      return dir;
+    }
     else if(strlen(filename)){
       dir_lookup (dir, filename, &inode);
       dir_close (dir);
@@ -218,7 +222,7 @@ filesys_chdir (const char *name)
     }
     else{
       free(temp);
-      return dir_reopen(dir);
+      return dir;
     }
   }
   return NULL;
@@ -254,7 +258,6 @@ filesys_open (const char *name)
   }
 
   free(temp);
-
   return file_open (inode);
 }
 

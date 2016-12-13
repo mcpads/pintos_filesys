@@ -245,7 +245,8 @@ static void cacheLoadThread(void* aux)
   struct cache_e* ahead;
 
 
-  if(ahead = cacheGetIdx(aheadWrap.sec)){
+  if(ahead = cacheGetIdx(aheadWrap.sec)
+      || aheadWrap.sec >= block_size(fs_device)){
     sema_up(aheadWrap.sema);
     thread_exit();
   }
