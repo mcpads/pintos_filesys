@@ -7,11 +7,17 @@
 
 struct bitmap;
 
+struct inode;
+
+int inode_get_open_cnt(const struct inode*);
+
 void inode_init (void);
-bool inode_create (block_sector_t, off_t);
+bool inode_create (block_sector_t, off_t, block_sector_t);
 struct inode *inode_open (block_sector_t);
 struct inode *inode_reopen (struct inode *);
 block_sector_t inode_get_inumber (const struct inode *);
+block_sector_t inode_get_parent (const struct inode *);
+bool inode_is_dir(const struct inode*);
 void inode_close (struct inode *);
 void inode_remove (struct inode *);
 off_t inode_read_at (struct inode *, void *, off_t size, off_t offset);

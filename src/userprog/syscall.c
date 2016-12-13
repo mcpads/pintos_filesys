@@ -7,6 +7,8 @@
 
 #include "filesys/file.h"
 #include "filesys/filesys.h"
+#include "filesys/directory.h"
+#include "filesys/inode.h"
 #include "threads/vaddr.h"
 #include "userprog/pagedir.h"
 #include "threads/malloc.h"
@@ -72,9 +74,7 @@ close_with_fd(int fd)
       pos != list_end (&cur->fd_list) ; pos = pos->next){
     pos_fd = list_entry(pos, struct fd_elem, elem);
     if(pos_fd->fd == fd){
-      lock_acquire(&filesys_lock);
       file_close(pos_fd->this_file); // it has file_allow_write in it's content
-      lock_release(&filesys_lock);
       list_remove(pos);
       free(pos_fd);
       return true;
@@ -96,9 +96,7 @@ close_all_fd(struct list* fd_list)
     pos_fd = list_entry(pos, struct fd_elem, elem);
     next = pos->next;
 
-    lock_acquire(&filesys_lock);
     file_close(pos_fd->this_file); // it has file_allow_write in it's content
-    lock_release(&filesys_lock);
     list_remove(pos);
     free(pos_fd);
   }
@@ -122,7 +120,6 @@ syscall_init (void)
 {
   intr_register_int (0x30, 3, INTR_ON, syscall_handler, "syscall");
   lock_init(&fd_lock);
-  lock_init(&filesys_lock);
 }
 
   static void
@@ -199,17 +196,17 @@ syscall_handler (struct intr_frame *f)
       break;
     case SYS_CHDIR:
       USERASSERT(is_user_vaddr(f->esp + 4));
-      CHECK_VALID_USERADDR(SYSCALL_NTH_ARG(f, 1, char*));
+      CHECK_VALID_USERADDR(SYSCALL_NTH_ARG(f, 1, void*));
       f->eax = syscall_chdir(SYSCALL_NTH_ARG(f, 1, char*));
       break;
     case SYS_MKDIR:
       USERASSERT(is_user_vaddr(f->esp + 4));
-      CHECK_VALID_USERADDR(SYSCALL_NTH_ARG(f, 1, char*));
+      CHECK_VALID_USERADDR(SYSCALL_NTH_ARG(f, 1, void*));
       f->eax = syscall_mkdir(SYSCALL_NTH_ARG(f, 1, char*));
       break;
     case SYS_READDIR:
       USERASSERT(is_user_vaddr(f->esp + 8));
-      CHECK_VALID_USERADDR(SYSCALL_NTH_ARG(f, 2, char*));
+      CHECK_VALID_USERADDR(SYSCALL_NTH_ARG(f, 2, void*));
       f->eax = syscall_readdir(SYSCALL_NTH_ARG(f, 1, int), SYSCALL_NTH_ARG(f, 2, char*));
       break;
     case SYS_ISDIR: 
@@ -252,12 +249,8 @@ syscall_exit (int status)
 
 pid_t syscall_exec (const char *file)
 {
-  pid_t t;
   USERASSERT(file);
-  lock_acquire(&filesys_lock);
-  t = process_execute(file);
-  lock_release(&filesys_lock);
-  return t;
+  return process_execute(file);
 }
 
 int syscall_wait (pid_t t)
@@ -320,26 +313,20 @@ bool syscall_create (const char *file, unsigned initial_size)
 {
   // Now, we have to treat file == NULL case, since filesys_create call ASSERT(file != NULL), ASSERT(length >= 0).
   // User Process do not want to abort all system to create NULL file. Only one(caller) die.	
-  bool succ;
-
   USERASSERT(file);
-
-  lock_acquire(&filesys_lock);
-  succ = filesys_create(file, initial_size);
-  lock_release(&filesys_lock);
-  return succ;
+  return filesys_create(file, initial_size, false);
 }
 
   bool 
 syscall_remove (const char *file)
 {	
-  bool succ;
-
   USERASSERT(file);
-  lock_acquire(&filesys_lock);
-  succ = filesys_remove(file);
-  lock_release(&filesys_lock);
-  return succ;
+  //TODO: remove 
+  //    if given string is empty directory
+  //       or it is file
+  //
+  //       do not remove if it's not empty directory (rmdir)
+  return filesys_remove(file);
 }
 
   int 
@@ -349,12 +336,8 @@ syscall_open (const char *file)
   struct fd_elem* fdelem;
   USERASSERT(file);
 
-  lock_acquire(&filesys_lock);
-  if(!(f = filesys_open(file))) {
-    lock_release(&filesys_lock);
+  if(!(f = filesys_open(file))) 
     return -1;
-  }
-  lock_release(&filesys_lock);
 
 
   // TODO: It must be free when fd is close or something.
@@ -372,12 +355,8 @@ syscall_filesize (int fd)
 {
   // TODO: check fd is valid
   // stdin, stdout, stderr
-  int t;
   CHECK_VALID_FD(fd);
-  lock_acquire(&filesys_lock);
-  t = file_length(file_of_fd(fd));
-  lock_release(&filesys_lock);
-  return t;
+  return file_length(file_of_fd(fd));
 }
 
 
@@ -395,9 +374,7 @@ syscall_read (int fd, void *buffer, unsigned length)
     }
     return i;
   }
-  lock_acquire(&filesys_lock);
   t = file_read(file_of_fd(fd), buffer, length);
-  lock_release(&filesys_lock);
   return t;
 }
 
@@ -410,9 +387,7 @@ syscall_write (int fd, const void *buffer, unsigned length)
     putbuf(buffer, length);
     return length;
   }
-  lock_acquire(&filesys_lock);
   t = file_write(file_of_fd(fd), buffer, length);
-  lock_release(&filesys_lock);
 //printf ("write_t: %d\n",t);
   return t;
 }
@@ -421,9 +396,7 @@ syscall_write (int fd, const void *buffer, unsigned length)
 syscall_seek (int fd, unsigned position)
 {
   CHECK_VALID_FD(fd);
-  lock_acquire(&filesys_lock);
   file_seek(file_of_fd(fd), position);
-  lock_release(&filesys_lock);
 }
 
   unsigned 
@@ -431,10 +404,7 @@ syscall_tell (int fd)
 {
   unsigned t;
   CHECK_VALID_FD(fd);
-  lock_acquire(&filesys_lock);
   t = file_tell(file_of_fd(fd));
-  lock_release(&filesys_lock);
-  // printf ("tell_t: %d\n", t);
   return t;
 }
 
@@ -451,29 +421,43 @@ syscall_close (int fd)
 bool 
 syscall_chdir(const char* dir)
 {
-  return true;
+  USERASSERT(dir);
+  struct dir* this_dir = filesys_chdir(dir);
+  if(!this_dir)
+    return false;
+  else
+    thread_current()->current_dir = this_dir;
+  return true; 
 }
 
 bool
 syscall_mkdir(const char* dir)
 {
-  return true;
+  USERASSERT(dir);
+  return filesys_create(dir, 0, true);
 }
 
 bool
 syscall_readdir(int fd, char* name)
 {
-  return true;
+  CHECK_VALID_FD(fd);
+  struct dir* dir = (struct dir*)file_of_fd(fd);
+  if(dir)
+    return dir_readdir(dir, name);
+  else
+    return false;
 }
 
 bool 
 syscall_isdir(int fd)
 {
-  return true;
+  CHECK_VALID_FD(fd);
+  return inode_is_dir(file_get_inode(file_of_fd(fd)));
 }
 
 int 
 syscall_inumber(int fd)
 {
-  return -1;
+  CHECK_VALID_FD(fd);
+  return inode_get_inumber(file_get_inode(file_of_fd(fd))); 
 }

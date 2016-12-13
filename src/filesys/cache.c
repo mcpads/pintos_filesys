@@ -15,12 +15,7 @@ enum buf_flag_t {
 };
 
 
-/* Cache Entry
- *
- *
- * TODO: write read condition
- *
- */
+/* Cache Entry */
 
 struct cache_e
 {
@@ -58,7 +53,12 @@ cacheUpdate(struct list_elem* e)
 }
 
 
-
+/*
+ * cache synch functions
+ *
+ * DESC | lock/unlock implementation with Readers-Writer Algorithm
+ *
+ */
 
 void cache_write_acquire(struct cache_e* c)
 {
@@ -161,10 +161,10 @@ void cache_init()
 /*
  * cacheGetFree
  *
- * DESC | Get B_VALID cache element
+ * DESC | Get B_VALID cache element, update each hit
  *
  * RET  | if cache is full, NULL
- *      | else last element of (LOCKED) cache mem
+ *      | else last element of cache mem
  */
 static struct cache_e* 
 cacheGetFree(void)
@@ -185,12 +185,12 @@ cacheGetFree(void)
 /*
  * cacheGetIdx
  *
- * DESC | Get element which has same values with given
+ * DESC | Get element which has same values with given, update each hit
  *
  * IN   | sec - given sector number
  *
  * RET  | If fail, NULL
- *      | else, list_elem* of found (LOCKED) value
+ *      | else, list_elem* of found value
  */
 static struct cache_e*
 cacheGetIdx(block_sector_t sec)
@@ -216,15 +216,26 @@ cacheGetIdx(block_sector_t sec)
   return NULL;
 }
 
+/* structure for load thread */
+
 struct ahead_set
 {
   block_sector_t sec;
   struct semaphore* sema;
 };
 
-
 static void cache_eviction(void);
 
+
+
+/*
+ * cacheLoadThread
+ *
+ * DESC | read-ahead block with thread_create
+ *
+ * IN   | aux - pointer of ahead_set
+ *
+ */
 
 static void cacheLoadThread(void* aux)
 {
@@ -258,12 +269,12 @@ static void cacheLoadThread(void* aux)
 /* 
  * cacheLoadBlock
  *
- * DESC | Load 2 data (Read-Ahead) from sector if cache miss occur, 
+ * DESC | Load 1 data (+ Read-Ahead) from sector if cache miss occur, 
  *      | and return list_elem* of sector
  *
  * IN   | sec - given sector number
  *
- * RET  | list_elem* of given value
+ * RET  | entry* of given value
  *
  */
 
@@ -294,8 +305,7 @@ cacheLoadBlock(block_sector_t sec)
     thread_create("ahead_reader", PRI_DEFAULT, cacheLoadThread, aheadWrap);
     sema_down(&sema1);
   }
- 
-  // still get lock
+
   return ndata;
 }
 
@@ -309,8 +319,8 @@ cacheLoadBlock(block_sector_t sec)
 /*
  * cache_write
  *
- * DESC | Write Data 'from' and other extra field to valid cache.
- *      | Then, Update Cache(MRU), mark (BUSY | DIRTY) flag.
+ * DESC | Write Data 'from' and other extra field to valid cache entry.
+ *      | Then, Update Cache(MRU), mark DIRTY flag.
  *
  * IN   | sec - given sector number
  *      | from - caller's data
@@ -334,8 +344,8 @@ void cache_write(block_sector_t sec, const void* from)
 /*
  * cache_read
  *
- * DESC | Write cache to Data 'to', and fill extra field to valid cache.
- *      | Then, Update Cache(MRU), mark BUSY flag.
+ * DESC | Write cache to Data 'to', and fill extra field to valid cache entry.
+ *      | Then, Update Cache(MRU).
  *
  * IN   | sec - given sector number
  *      | to - caller's data
@@ -378,9 +388,9 @@ static void oneblock_release(struct cache_e* buffer)
  * cache_force_one
  *
  * DESC | force one sector of cache to write-back, and initialize.
- *      | "force clear"
  *
- * IN   | pos - list_elem* of cache
+ * IN   | buffer - given buffer
+ *      | force  - if true, ignore buffer flag/readers count.
  *
  */
 static bool cache_force_one(struct cache_e* buffer, bool force)

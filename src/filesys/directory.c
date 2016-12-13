@@ -5,12 +5,14 @@
 #include "filesys/filesys.h"
 #include "filesys/inode.h"
 #include "threads/malloc.h"
+#include "threads/thread.h"
 
 /* A directory. */
 struct dir 
   {
     struct inode *inode;                /* Backing store. */
     off_t pos;                          /* Current position. */
+    bool unused; // for consistancy with file
   };
 
 /* A single directory entry. */
@@ -21,12 +23,23 @@ struct dir_entry
     bool in_use;                        /* In use or free? */
   };
 
+block_sector_t directory_get_inumber(struct dir* dir)
+{
+  return inode_get_inumber(dir->inode);
+}
+
+block_sector_t directory_get_parent(struct dir* dir)
+{
+  return inode_get_parent(dir->inode);
+}
+
 /* Creates a directory with space for ENTRY_CNT entries in the
    given SECTOR.  Returns true if successful, false on failure. */
 bool
-dir_create (block_sector_t sector, size_t entry_cnt)
+dir_create (block_sector_t sector, size_t entry_cnt, block_sector_t parent)
 {
-  return inode_create (sector, entry_cnt * sizeof (struct dir_entry));
+  return inode_create (sector, entry_cnt * sizeof (struct dir_entry),
+                      parent);
 }
 
 /* Opens and returns the directory for the given INODE, of which
@@ -34,6 +47,8 @@ dir_create (block_sector_t sector, size_t entry_cnt)
 struct dir *
 dir_open (struct inode *inode) 
 {
+  if(inode && inode_get_parent(inode) == -1)
+    return NULL;
   struct dir *dir = calloc (1, sizeof *dir);
   if (inode != NULL && dir != NULL)
     {
@@ -184,10 +199,10 @@ dir_add (struct dir *dir, const char *name, block_sector_t inode_sector)
 bool
 dir_remove (struct dir *dir, const char *name) 
 {
-  struct dir_entry e;
+  struct dir_entry e, cur;
   struct inode *inode = NULL;
   bool success = false;
-  off_t ofs;
+  off_t ofs, curofs;
 
   ASSERT (dir != NULL);
   ASSERT (name != NULL);
@@ -200,6 +215,19 @@ dir_remove (struct dir *dir, const char *name)
   inode = inode_open (e.inode_sector);
   if (inode == NULL)
     goto done;
+
+  if(inode_get_parent(inode) != -1){
+    if(thread_current()->current_dir
+        && inode_get_inumber(inode) == 
+        directory_get_inumber(thread_current()->current_dir))
+      goto done;
+    if(inode_get_open_cnt(inode) > 1)
+      goto done;
+    for (curofs = 0; inode_read_at (inode, &cur, sizeof cur, curofs) == sizeof cur;
+       curofs += sizeof cur) 
+    if (cur.in_use)
+      goto done;
+  }
 
   /* Erase directory entry. */
   e.in_use = false;
@@ -234,3 +262,5 @@ dir_readdir (struct dir *dir, char name[NAME_MAX + 1])
     }
   return false;
 }
+
+

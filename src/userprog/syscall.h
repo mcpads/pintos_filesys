@@ -21,7 +21,6 @@ struct finished_elem
 	struct list_elem elem;
 };
 
-struct lock filesys_lock; // lock for filesys system call
 
 struct file* file_of_fd(int fd);
 

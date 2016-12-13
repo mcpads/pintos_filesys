@@ -498,9 +498,12 @@ init_thread (struct thread *t, const char *name, int priority)
       && strcmp(name, "ahead_reader")){
     list_push_back(&thread_current()->child_list, &t->child_elem);
     t->parent = thread_current();
+    t->current_dir = thread_current()->current_dir;
   }
-  else	
+  else{	
     t->parent = NULL;
+    t->current_dir = NULL;
+  }
   list_init(&t->fd_list);
   sema_init(&t->wait_sema, 0);
   sema_init(&t->succ_sema, 0);
