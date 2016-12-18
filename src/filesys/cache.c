@@ -58,9 +58,9 @@ void cache_write_acquire(struct cache_e* c)
   lock_acquire(&c->rw_lock);
 
   while(c->has_writer ||
-	  c->reader_count > 0)
+      c->reader_count > 0)
     cond_wait(&c->rw_cond, &c->rw_lock);
-  
+
   c->has_writer = true;
 
   lock_release(&c->rw_lock);
@@ -113,7 +113,7 @@ static void cacheWriteBackThread(void* aux UNUSED)
   int i;
   while(true){
     timer_sleep(TIMER_FREQ); // TODO: HOW MUCH?
-    
+
     for(i = 0 ; i < MAX_CACHE_SIZE ; i++) {
       cache_read_acquire(cache + i);
       if(cache[i].flag & B_DIRTY){ 
@@ -169,7 +169,7 @@ enum write_flag_t {
   W_NO
 };
 
-static struct cache_e*
+  static struct cache_e*
 cacheGetIdx(block_sector_t sec, enum write_flag_t wflag)
 {
   int i;
@@ -197,14 +197,14 @@ cacheGetIdx(block_sector_t sec, enum write_flag_t wflag)
   return NULL;
 }
 
-static inline void
+  static inline void
 cacheClockStep(void)
 {
   // only one thread can have eviction lock.
   clock_cache = (clock_cache == cache_end) ? cache : clock_cache + 1;
 }
 
-static void
+  static void
 cacheEntryFlush(struct cache_e* e, bool get_entry_lock)
 {
   lock_acquire(&e->entry_lock);
@@ -225,7 +225,7 @@ cacheEntryFlush(struct cache_e* e, bool get_entry_lock)
     lock_release(&e->entry_lock);
 }
 
-static struct cache_e*
+  static struct cache_e*
 cacheEvict(void)
 {
   int try_count = 0;
@@ -276,8 +276,6 @@ struct ahead_set
  *
  */
 
-static struct cache_e*
-cacheTryGetIdx(block_sector_t sec, enum write_flag_t wflag, bool ahead_flag);
 
 
 
@@ -289,10 +287,10 @@ static void cacheLoadThread(void* aux)
 
 
   if(aheadWrap.sec >= block_size(fs_device)){
-    sema_up(aheadWrap.sema);
+
     free(aux);
-    thread_exit();
- 
+    sema_up(aheadWrap.sema);
+    goto done;
   }
 
   while(!(ahead = cacheGetIdx(aheadWrap.sec, W_NO))){
@@ -301,6 +299,8 @@ static void cacheLoadThread(void* aux)
 
     ahead = cacheEvict();
     ahead->sec = aheadWrap.sec;
+
+    free(aux);
     sema_up(aheadWrap.sema);
 
     block_read(fs_device, aheadWrap.sec, ahead->data);
@@ -309,21 +309,20 @@ static void cacheLoadThread(void* aux)
     lock_release(&ahead->entry_lock);
     lock_release(&eviction_lock);
 
-
-    free(aux);
-    thread_exit();
-
+    goto done;
   }
 
   lock_release(&ahead->entry_lock);
-  sema_up(aheadWrap.sema);
 
   free(aux);
+  sema_up(aheadWrap.sema);
+
+done:
   thread_exit();
 }
 
-static struct cache_e*
-cacheTryGetIdx(block_sector_t sec, enum write_flag_t wflag, bool ahead_flag)
+  static struct cache_e*
+cacheTryGetIdx(block_sector_t sec, enum write_flag_t wflag)
 {
   bool evicted = false;
   struct cache_e* item;
@@ -340,10 +339,12 @@ cacheTryGetIdx(block_sector_t sec, enum write_flag_t wflag, bool ahead_flag)
     item->sec = sec;
     block_read(fs_device, sec, item->data);
 
-    lock_release(&item->entry_lock);
     item->flag |= B_RECENT;
 
+    lock_release(&item->entry_lock);
     lock_release(&eviction_lock);
+
+
 
     // get r/w cond in here
     if (wflag == W_WRITE){
@@ -353,21 +354,20 @@ cacheTryGetIdx(block_sector_t sec, enum write_flag_t wflag, bool ahead_flag)
     else if(wflag == W_READ)
       cache_read_acquire(item);
 
+
     // load second block
-    if(ahead_flag){
-      struct semaphore sema1;
-      sema_init(&sema1, 0);
 
-      struct ahead_set* aheadWrap = malloc(sizeof(struct ahead_set));
+    struct semaphore sema1;
+    sema_init(&sema1, 0);
+    struct ahead_set* aheadWrap = malloc(sizeof(struct ahead_set));
+    aheadWrap->sec = sec + 1;
+    aheadWrap->sema = &sema1;
 
-      if(aheadWrap){
-        aheadWrap->sec = sec + 1;
-        aheadWrap->sema = &sema1;
-        thread_create("ahead_reader", PRI_DEFAULT, cacheLoadThread, aheadWrap);
-        sema_down(&sema1);
-      }
-      break;
-    }
+
+    thread_create("ahead_reader", PRI_DEFAULT, cacheLoadThread, aheadWrap);
+    sema_down(&sema1);
+
+    break;
   }
   if(!evicted)
     lock_release(&item->entry_lock);
@@ -397,7 +397,7 @@ cacheTryGetIdx(block_sector_t sec, enum write_flag_t wflag, bool ahead_flag)
  */
 void cache_write(block_sector_t sec, const void* from)
 {
-  struct cache_e* buffer = cacheTryGetIdx(sec, W_WRITE, true);
+  struct cache_e* buffer = cacheTryGetIdx(sec, W_WRITE);
 
   // get lock by cacheGetIdx or cacheLoadBlock
   memcpy(buffer->data, from, BLOCK_SECTOR_SIZE);
@@ -417,7 +417,7 @@ void cache_write(block_sector_t sec, const void* from)
  */
 void cache_read(block_sector_t sec, void* to)
 {
-  struct cache_e* buffer = cacheTryGetIdx(sec, W_READ, true);
+  struct cache_e* buffer = cacheTryGetIdx(sec, W_READ);
 
   memcpy(to, buffer->data, BLOCK_SECTOR_SIZE);
   cache_read_release(buffer);

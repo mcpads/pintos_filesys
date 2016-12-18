@@ -4,6 +4,7 @@
 #include "lib/user/syscall.h"
 #include "filesys/file.h"
 #include "lib/kernel/list.h"
+#include "filesys/directory.h"
 
 void syscall_init (void);
 
@@ -11,6 +12,7 @@ struct fd_elem
 {
 	int fd;
 	struct file* this_file;
+  struct dir* this_directory;
 	struct list_elem elem;
 };
 

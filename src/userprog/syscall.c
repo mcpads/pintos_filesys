@@ -40,6 +40,25 @@ static void syscall_handler (struct intr_frame *);
 // lock used by allocate_fd()
 static struct lock fd_lock;
 
+struct fd_elem*
+fdelem_of_fd(int fd)
+{
+  struct thread* cur = thread_current();
+  struct list_elem* pos;
+  struct fd_elem* pos_fd;
+
+  if(list_empty(&cur->fd_list))
+    return NULL;
+
+  for(pos = list_begin (&cur->fd_list) ; 
+      pos != list_end (&cur->fd_list) ; pos = pos->next){
+    pos_fd = list_entry(pos, struct fd_elem, elem);
+    if(pos_fd->fd == fd)
+      return pos_fd;
+  }
+  return NULL;
+}
+
   struct file*
 file_of_fd(int fd)
 {
@@ -96,7 +115,10 @@ close_all_fd(struct list* fd_list)
     pos_fd = list_entry(pos, struct fd_elem, elem);
     next = pos->next;
 
-    file_close(pos_fd->this_file); // it has file_allow_write in it's content
+    if(pos_fd->this_directory)
+      dir_close(pos_fd->this_directory);
+    else
+      file_close(pos_fd->this_file); // it has file_allow_write in it's content
     list_remove(pos);
     free(pos_fd);
   }
@@ -344,6 +366,19 @@ syscall_open (const char *file)
   // Only fd owner could act with fd.
   fdelem =  malloc(sizeof (struct fd_elem));
   fdelem->fd = allocate_fd();
+  fdelem->this_directory = NULL;
+
+  struct inode* inode;
+  if(inode_is_dir(inode = file_get_inode(f))){
+    struct dir* dir;
+    if(thread_current()->current_dir &&
+        inode_get_inumber(inode) == 
+        directory_get_inumber(thread_current()->current_dir))
+        dir = dir_reopen(thread_current()->current_dir);
+    else
+        dir = dir_open(file_get_inode(f));
+    fdelem->this_directory = dir;
+  }
   fdelem->this_file = f;
   list_push_back(&thread_current()->fd_list, &fdelem->elem);
 
@@ -413,6 +448,8 @@ syscall_tell (int fd)
 syscall_close (int fd)
 {
   CHECK_VALID_FD(fd);
+  if(syscall_isdir(fd))
+    dir_close(fdelem_of_fd(fd)->this_directory);
   USERASSERT(close_with_fd(fd));
 }
 
@@ -444,23 +481,27 @@ bool
 syscall_readdir(int fd, char* name)
 {
   CHECK_VALID_FD(fd);
-  struct dir* dir = (struct dir*)file_of_fd(fd);
-  if(dir)
-    return dir_readdir(dir, name);
-  else
+  struct fd_elem* fde = fdelem_of_fd(fd);
+
+  if(!fde || !fde->this_directory)
     return false;
+  return dir_readdir(fde->this_directory, name);
 }
 
 bool 
 syscall_isdir(int fd)
 {
   CHECK_VALID_FD(fd);
-  return inode_is_dir(file_get_inode(file_of_fd(fd)));
+  return fdelem_of_fd(fd)->this_directory != NULL;
 }
 
 int 
 syscall_inumber(int fd)
 {
   CHECK_VALID_FD(fd);
-  return inode_get_inumber(file_get_inode(file_of_fd(fd))); 
+  struct fd_elem* fde = fdelem_of_fd(fd);
+  if(fde->this_directory)
+    return inode_get_inumber(dir_get_inode(fde->this_directory)); 
+  else
+    return inode_get_inumber(file_get_inode(fde->this_file));
 }
