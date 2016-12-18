@@ -1,6 +1,5 @@
 #include "filesys/cache.h"
 #include "threads/thread.h"
-#include "threads/malloc.h"
 #include "devices/timer.h"
 #include "filesys/filesys.h"
 #include "threads/synch.h"
@@ -188,10 +187,7 @@ cacheGetIdx(block_sector_t sec, enum write_flag_t wflag)
         cache[i].flag |= B_RECENT;
         return cache + i;
       }
-      else{
-        lock_release(&cache[i].entry_lock);
-        return NULL;
-      }
+      lock_release(&cache[i].entry_lock);
     }
   }
   return NULL;
@@ -284,16 +280,9 @@ cacheTryGetIdx(block_sector_t sec, enum write_flag_t wflag, bool ahead_flag);
 static void cacheLoadThread(void* aux)
 {
   struct ahead_set aheadWrap = *(struct ahead_set*)aux;
+  free(aux);
 
   struct cache_e* ahead;
-
-
-  if(aheadWrap.sec >= block_size(fs_device)){
-    sema_up(aheadWrap.sema);
-    free(aux);
-    thread_exit();
- 
-  }
 
   while(!(ahead = cacheGetIdx(aheadWrap.sec, W_NO))){
     if(!lock_try_acquire(&eviction_lock))
@@ -310,15 +299,12 @@ static void cacheLoadThread(void* aux)
     lock_release(&eviction_lock);
 
 
-    free(aux);
     thread_exit();
 
   }
 
   lock_release(&ahead->entry_lock);
   sema_up(aheadWrap.sema);
-
-  free(aux);
   thread_exit();
 }
 
@@ -435,11 +421,7 @@ void cache_flush(void)
 {
   int i;
   for(i = 0 ; i < MAX_CACHE_SIZE ; i++){
-
-    if(cache[i].flag & B_DIRTY){
-      block_write(fs_device, cache[i].sec, cache[i].data);
-      cache[i].flag -= B_DIRTY;
-    }
+    cacheEntryFlush(cache + i, false);
   }
 }
 

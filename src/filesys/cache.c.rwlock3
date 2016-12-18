@@ -1,6 +1,5 @@
 #include "filesys/cache.h"
 #include "threads/thread.h"
-#include "threads/malloc.h"
 #include "devices/timer.h"
 #include "filesys/filesys.h"
 #include "threads/synch.h"
@@ -22,7 +21,6 @@ enum buf_flag_t {
 struct cache_e
 {
   struct lock rw_lock;
-  struct lock entry_lock;
   struct condition rw_cond;
   int reader_count;
 
@@ -136,7 +134,6 @@ void cache_init()
   int i;
   lock_init(&eviction_lock);
   for(i = 0 ; i < MAX_CACHE_SIZE ; i++){
-    lock_init(&cache[i].entry_lock); // TODO: It is really needed?
     lock_init(&cache[i].rw_lock);
     cond_init(&cache[i].rw_cond);
     cache[i].reader_count = 0;
@@ -176,22 +173,15 @@ cacheGetIdx(block_sector_t sec, enum write_flag_t wflag)
 
   for(i = 0 ; i < MAX_CACHE_SIZE ; i++){
     if(cache[i].sec == sec){
-      lock_acquire(&cache[i].entry_lock);
-      if(cache[i].sec == sec){
-        if (wflag == W_WRITE){
-          cache_write_acquire(cache + i);
-          cache[i].flag |= B_ALL;
-        }
-        else if(wflag == W_READ)
-          cache_read_acquire(cache + i);
+      if (wflag == W_WRITE){
+        cache_write_acquire(cache + i);
+        cache[i].flag |= B_ALL;
+      }
+      else if(wflag == W_READ)
+        cache_read_acquire(cache + i);
 
-        cache[i].flag |= B_RECENT;
-        return cache + i;
-      }
-      else{
-        lock_release(&cache[i].entry_lock);
-        return NULL;
-      }
+      cache[i].flag |= B_RECENT;
+      return cache + i;
     }
   }
   return NULL;
@@ -205,9 +195,8 @@ cacheClockStep(void)
 }
 
 static void
-cacheEntryFlush(struct cache_e* e, bool get_entry_lock)
+cacheEntryFlush(struct cache_e* e)
 {
-  lock_acquire(&e->entry_lock);
   // wait for all writers/readers end
   cache_write_acquire(e);
 
@@ -221,8 +210,6 @@ cacheEntryFlush(struct cache_e* e, bool get_entry_lock)
   e->flag = B_RECENT;
 
   cache_write_release(e);
-  if(!get_entry_lock)
-    lock_release(&e->entry_lock);
 }
 
 static struct cache_e*
@@ -235,14 +222,14 @@ cacheEvict(void)
     cacheClockStep();
     // check (0, 0)
     if(!(clock_cache->flag & B_ALL)){
-      cacheEntryFlush(clock_cache, true);
+      cacheEntryFlush(clock_cache);
       break;
     }
 
     // if try count >= 1, evict (0, 1) => (1, 0)
     if(try_count >= 1){
       if(clock_cache->flag == B_DIRTY){
-        cacheEntryFlush(clock_cache, true);
+        cacheEntryFlush(clock_cache);
         break;
       }
       else if(clock_cache->flag & B_RECENT)
@@ -284,16 +271,9 @@ cacheTryGetIdx(block_sector_t sec, enum write_flag_t wflag, bool ahead_flag);
 static void cacheLoadThread(void* aux)
 {
   struct ahead_set aheadWrap = *(struct ahead_set*)aux;
+  free(aux);
 
   struct cache_e* ahead;
-
-
-  if(aheadWrap.sec >= block_size(fs_device)){
-    sema_up(aheadWrap.sema);
-    free(aux);
-    thread_exit();
- 
-  }
 
   while(!(ahead = cacheGetIdx(aheadWrap.sec, W_NO))){
     if(!lock_try_acquire(&eviction_lock))
@@ -306,33 +286,26 @@ static void cacheLoadThread(void* aux)
     block_read(fs_device, aheadWrap.sec, ahead->data);
     ahead->flag |= B_RECENT;
 
-    lock_release(&ahead->entry_lock);
     lock_release(&eviction_lock);
 
 
-    free(aux);
     thread_exit();
 
   }
 
-  lock_release(&ahead->entry_lock);
   sema_up(aheadWrap.sema);
-
-  free(aux);
   thread_exit();
 }
 
 static struct cache_e*
 cacheTryGetIdx(block_sector_t sec, enum write_flag_t wflag, bool ahead_flag)
 {
-  bool evicted = false;
   struct cache_e* item;
   while(!(item = cacheGetIdx(sec, wflag))){
     // only lock held by this thread
     if(!lock_try_acquire(&eviction_lock))
       continue;
 
-    evicted = true;
 
     // load now block
     item = cacheEvict();
@@ -340,7 +313,6 @@ cacheTryGetIdx(block_sector_t sec, enum write_flag_t wflag, bool ahead_flag)
     item->sec = sec;
     block_read(fs_device, sec, item->data);
 
-    lock_release(&item->entry_lock);
     item->flag |= B_RECENT;
 
     lock_release(&eviction_lock);
@@ -369,8 +341,6 @@ cacheTryGetIdx(block_sector_t sec, enum write_flag_t wflag, bool ahead_flag)
       break;
     }
   }
-  if(!evicted)
-    lock_release(&item->entry_lock);
   return item;
 }
 
@@ -397,7 +367,11 @@ cacheTryGetIdx(block_sector_t sec, enum write_flag_t wflag, bool ahead_flag)
  */
 void cache_write(block_sector_t sec, const void* from)
 {
-  struct cache_e* buffer = cacheTryGetIdx(sec, W_WRITE, true);
+  struct cache_e* buffer;
+  
+  while((buffer = cacheTryGetIdx(sec, W_WRITE, true))
+      && buffer->sec != sec)
+    cache_write_release(buffer);
 
   // get lock by cacheGetIdx or cacheLoadBlock
   memcpy(buffer->data, from, BLOCK_SECTOR_SIZE);
@@ -417,7 +391,11 @@ void cache_write(block_sector_t sec, const void* from)
  */
 void cache_read(block_sector_t sec, void* to)
 {
-  struct cache_e* buffer = cacheTryGetIdx(sec, W_READ, true);
+  struct cache_e* buffer;
+  
+  while((buffer = cacheTryGetIdx(sec, W_READ, true))
+      && buffer->sec != sec)
+    cache_read_release(buffer);
 
   memcpy(to, buffer->data, BLOCK_SECTOR_SIZE);
   cache_read_release(buffer);
@@ -435,11 +413,7 @@ void cache_flush(void)
 {
   int i;
   for(i = 0 ; i < MAX_CACHE_SIZE ; i++){
-
-    if(cache[i].flag & B_DIRTY){
-      block_write(fs_device, cache[i].sec, cache[i].data);
-      cache[i].flag -= B_DIRTY;
-    }
+    cacheEntryFlush(cache + i);
   }
 }
 

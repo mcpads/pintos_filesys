@@ -1,4 +1,5 @@
 #include "filesys/inode.h"
+#include "threads/synch.h"
 #include <list.h>
 #include <debug.h>
 #include <round.h>
@@ -159,6 +160,10 @@ byte_to_sector (const struct inode *inode, off_t pos)
 /* List of open inodes, so that opening a single inode twice
    returns the same `struct inode'. */
 static struct list open_inodes;
+
+
+
+
 
 /* Initializes the inode module. */
   void
@@ -351,6 +356,7 @@ inode_open (block_sector_t sector)
     }
   }
 
+
   /* Allocate memory. */
   inode = malloc (sizeof *inode);
   if (inode == NULL)
@@ -363,6 +369,7 @@ inode_open (block_sector_t sector)
   inode->deny_write_cnt = 0;
   inode->removed = false;
   COND_block_read (fs_device, inode->sector, &inode->data);
+
   return inode;
 }
 
@@ -370,8 +377,9 @@ inode_open (block_sector_t sector)
   struct inode *
 inode_reopen (struct inode *inode)
 {
-  if (inode != NULL)
+  if (inode != NULL){
     inode->open_cnt++;
+  }
   return inode;
 }
 
@@ -481,7 +489,6 @@ inode_close (struct inode *inode)
         free_map_release (inode->data.d_ind_blocks, 1);
       }
     }
-
     free (inode); 
   }
 }
@@ -578,7 +585,7 @@ inode_write_at (struct inode *inode, const void *buffer_, off_t size,
   off_t bytes_written = 0;
   uint8_t *bounce = NULL;
 
-  if (inode->deny_write_cnt || fs_device == block_size (fs_device))
+  if (inode->deny_write_cnt)
     return 0;
 
   // Filling with zeros within gap
