@@ -11,6 +11,7 @@
 #include "filesys/directory.h"
 #include "filesys/file.h"
 #include "filesys/filesys.h"
+#include "filesys/cache.h"
 #include "threads/flags.h"
 #include "threads/init.h"
 #include "threads/interrupt.h"
@@ -208,6 +209,10 @@ process_exit (void)
   struct list_elem* pos, *next;
   uint32_t *pd;
 
+#ifdef FILESYS
+  if(cur->current_dir)
+    dir_close(cur->current_dir);
+#endif
 
   if(!list_empty(&cur->finished_list)){
     for(pos = list_begin(&cur->finished_list) ; 

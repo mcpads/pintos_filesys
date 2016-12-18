@@ -495,7 +495,8 @@ init_thread (struct thread *t, const char *name, int priority)
   list_init(&t->finished_list);
   list_init(&t->child_list);
   if(t != initial_thread && strcmp(name, "idle") 
-      && strcmp(name, "ahead_reader")){
+      && strcmp(name, "ahead_reader")
+      && strcmp(name, "cache_wb")){
     list_push_back(&thread_current()->child_list, &t->child_elem);
     t->parent = thread_current();
     t->current_dir = thread_current()->current_dir;

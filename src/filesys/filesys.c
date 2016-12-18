@@ -7,6 +7,8 @@
 #include "filesys/free-map.h"
 #include "filesys/inode.h"
 #include "filesys/directory.h"
+#include "filesys/cache.h"
+#include "threads/malloc.h"
 
 /* Partition that contains the file system. */
 struct block *fs_device;
@@ -36,13 +38,13 @@ filesys_init (bool format)
 void
 filesys_done (void) 
 {
+  free_map_close ();
 #ifdef FILESYS
   cache_flush();
 #endif
-  free_map_close ();
 }
 
-struct dir* dir_of_name(char* s)
+static struct dir* dir_of_name(char* s)
 {
   char* save_ptr, *token;
   struct dir* result_dir;
@@ -104,7 +106,7 @@ done:
   return success ? result_dir : NULL;
 }
 
-void div_part(char* name, char** dir, char** filename)
+static void div_part(char* name, char** dir, char** filename)
 {
   int i = strlen(name);
   while(i--){
@@ -119,7 +121,7 @@ void div_part(char* name, char** dir, char** filename)
   *dir = NULL;
 }
 
-static int get_filename_length(char* name)
+static int get_filename_length(const char* name)
 {
   int i = strlen(name);
   int res = 0;
@@ -132,6 +134,32 @@ static int get_filename_length(char* name)
     res++;
   }
   return res;
+}
+
+void unique_slash(char* name)
+{
+  int j = 0;
+  int i = 0;
+  bool slash_flag = false;
+  int slash_start = 0;
+  while(name[i]){
+    if(!slash_flag && name[i] == '/'){
+      slash_flag = true;
+      slash_start = i;
+    }
+    else if(slash_flag && name[i] != '/'){ 
+      if(i != slash_start + 1){
+        for(j = 1 ; name[i+j-1] ; j++)
+          name[slash_start+j] = name[i+j-1];
+
+        name[slash_start+j] = '\0';
+      }
+      slash_flag = false;
+    }
+    i++;
+  }
+  if(slash_flag)
+    name[slash_start + 1] = '\0';
 }
 
 
@@ -151,6 +179,8 @@ filesys_create (const char *name, off_t initial_size, bool is_dir)
     return false;
   char* temp = (char*)malloc(sizeof(strlen(name) + 1));
   strlcpy(temp, name, strlen(name) + 1);
+
+  unique_slash(temp);
 
   char* direct, *filename;
   div_part(temp, &direct, &filename);
@@ -196,6 +226,7 @@ filesys_chdir (const char *name)
   char* temp = (char*)malloc(sizeof(strlen(name) + 1));
   strlcpy(temp, name, strlen(name) + 1);
 
+  unique_slash(temp);
   char* direct, *filename;
   div_part(temp, &direct, &filename);
 
@@ -237,6 +268,7 @@ filesys_open (const char *name)
   char* temp = (char*)malloc(sizeof(strlen(name) + 1));
   strlcpy(temp, name, strlen(name) + 1);
 
+  unique_slash(temp);
   char* direct, *filename;
   div_part(temp, &direct, &filename);
 
@@ -276,12 +308,13 @@ filesys_remove (const char *name)
   char* temp = (char*)malloc(sizeof(strlen(name) + 1));
   strlcpy(temp, name, strlen(name) + 1);
 
+  unique_slash(temp);
   char* direct, *filename;
   div_part(temp, &direct, &filename);
 
   while(strlen(filename) == 0){
     char* temp2;
-    div_part(direct, &temp2, filename);
+    div_part(direct, &temp2, &filename);
     direct = temp2;
     if(!direct){
       if(!strlen(filename)) 

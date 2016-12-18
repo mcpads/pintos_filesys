@@ -135,6 +135,17 @@ fsutil_extract (char **argv UNUSED)
                 PANIC ("%s: write failed with %d bytes unwritten",
                        file_name, size);
               size -= chunk_size;
+
+
+              // check write is fail
+              //
+              char buf[chunk_size];
+              off_t now = file_tell(dst);
+              file_seek(dst, now - chunk_size);
+              file_read(dst, buf, chunk_size);
+              if(memcmp(buf, data, chunk_size) != 0)
+                PANIC("file write fail");
+
             }
 
           /* Finish up. */

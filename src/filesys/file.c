@@ -1,4 +1,5 @@
 #include "filesys/file.h"
+#include "filesys/cache.h"
 #include <debug.h>
 #include "filesys/inode.h"
 #include "threads/malloc.h"
@@ -51,6 +52,9 @@ file_close (struct file *file)
       inode_close (file->inode);
       free (file); 
     }
+#ifdef FILESYS
+  cache_flush();
+#endif
 }
 
 /* Returns the inode encapsulated by FILE. */
